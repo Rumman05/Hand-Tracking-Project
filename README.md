@@ -1,13 +1,13 @@
 # Hand Tracker
 
-A real-time hand tracking application using OpenCV and MediaPipe that detects hand gestures and counts fingers.
+A real-time hand tracking application using OpenCV and MediaPipe that detects finger counting and hand gestures.
 
 ## Features
 
-- Real-time hand detection and tracking
-- Finger counting (0-5 fingers)
-- Thumbs up gesture recognition
-- Visual hand landmark overlay
+- **Real-time hand detection** - Tracks up to 2 hands simultaneously
+- **Finger counting** - Counts and displays the number of extended fingers (0-5)
+- **Gesture recognition** - Detects "Thumbs Up" gesture
+- **Live video feed** - Uses your webcam for real-time tracking
 
 ## Requirements
 
@@ -18,36 +18,37 @@ mediapipe
 
 ## Installation
 
+1. Install the required packages:
 ```bash
 pip install opencv-python mediapipe
 ```
 
-## Usage
-
-Run the script:
-
+2. Run the application:
 ```bash
 python Hand_Tracker.py
 ```
 
-- Hold your hand in front of the camera
-- The app will display the number of extended fingers
-- Make a thumbs up gesture for detection
+## Usage
+
+- Point your hand(s) toward the camera
+- The application will display:
+  - Hand landmarks and connections
+  - Number of extended fingers
+  - "Thumbs Up" when detected
 - Press 'q' to quit
 
 ## How it Works
 
-The application uses MediaPipe's hand landmark detection to:
-1. Identify 21 key points on each hand
+The application uses MediaPipe's hand tracking solution to:
+1. Detect hand landmarks in real-time
 2. Calculate angles between finger joints to determine if fingers are extended
-3. Detect specific gestures based on finger positions and angles
+3. Count extended fingers based on joint angles
+4. Recognize specific gestures like "Thumbs Up" based on thumb positioning
 
 ## Controls
 
-- **q** - Quit the application
+- **Q** - Quit the application
 
-## Notes
+---
 
-- Works with up to 2 hands simultaneously
-- Requires decent lighting for best results
-- Adjust detection confidence in the code if needed
+*Note: Make sure you have a working webcam connected to your system.*
