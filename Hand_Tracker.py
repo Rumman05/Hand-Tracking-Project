@@ -1,119 +1,229 @@
+import math
 import cv2
 import mediapipe as mp
-import math
+import pyautogui
+import tkinter as tk
+from tkinter import messagebox
+import numpy as np
+import threading
 
-# Initialize MediaPipe Hands
-mp_hands = mp.solutions.hands
-hands = mp_hands.Hands(static_image_mode=False,
-                       max_num_hands=2,
-                       min_detection_confidence=0.5,
-                       min_tracking_confidence=0.5)
-mp_drawing = mp.solutions.drawing_utils
-
-# Initialize Video Capture
-cap = cv2.VideoCapture(0)
-
-def calculate_distance(landmark1, landmark2):
-    """Calculates the 3D Euclidean distance between two landmarks."""
-    x1, y1, z1 = landmark1.x, landmark1.y, landmark1.z
-    x2, y2, z2 = landmark2.x, landmark2.y, landmark2.z
-    return math.sqrt((x2 - x1)**2 + (y2 - y1)**2 + (z2 - z1)**2)
+# Disable corner fail-safe
+pyautogui.FAILSAFE = False
 
 
-def calculate_angle(a, b, c):
-    """Calculates the angle between three points (in degrees)."""
-    ba_x = a.x - b.x
-    ba_y = a.y - b.y
-    ba_z = a.z - b.z
-
-    bc_x = c.x - b.x
-    bc_y = c.y - b.y
-    bc_z = c.z - b.z
-
-    dot_product = ba_x * bc_x + ba_y * bc_y + ba_z * bc_z
-
-    magnitude_ba = math.sqrt(ba_x**2 + ba_y**2 + ba_z**2)
-    magnitude_bc = math.sqrt(bc_x**2 + bc_y**2 + bc_z**2)
-
-    if magnitude_ba * magnitude_bc == 0:
-        return 0.0
-
-    angle_radians = math.acos(dot_product / (magnitude_ba * magnitude_bc))
-    return math.degrees(angle_radians)
+def start_capture_thread(cap, frame_dict, lock):
+    """Continuously read frames from cap into frame_dict['frame']"""
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        with lock:
+            frame_dict['frame'] = frame
+    cap.release()
 
 
-def count_fingers_held_up(hand_landmarks):
-    """Counts the number of fingers held up (extended from a closed fist)."""
-    finger_tips = [8, 12, 16, 20]
-    knuckles = [6, 10, 14, 18]
-    finger_bases = [5, 9, 13, 17]
-    extended_fingers = 0
+class HandMouseController:
+    """
+    Hand-driven mouse control:
+      - Reduced model complexity
+      - Async frame capture
+      - Adjustable sensitivity and smoothing
+      - Processing every frame
+    """
+    TIP_IDS = [4, 8, 12, 16, 20]
+    PIP_IDS = [3, 6, 10, 14, 18]
 
-    for i in range(4):
-      tip_landmark = hand_landmarks.landmark[finger_tips[i]]
-      knuckle_landmark = hand_landmarks.landmark[knuckles[i]]
-      base_landmark = hand_landmarks.landmark[finger_bases[i]]
+    def __init__(
+        self,
+        cam_width: int = 320,
+        cam_height: int = 240,
+        sensitivity: float = 0.5,
+        stability_frames: int = 3,
+        smoothing_alpha: float = 0.2,
+        min_detection_confidence: float = 0.5,
+        min_tracking_confidence: float = 0.5
+    ):
+        self.cam_w = cam_width
+        self.cam_h = cam_height
+        self.sensitivity = sensitivity
+        self.hands = mp.solutions.hands.Hands(
+            static_image_mode=False,
+            max_num_hands=1,
+            model_complexity=0,
+            min_detection_confidence=min_detection_confidence,
+            min_tracking_confidence=min_tracking_confidence
+        )
+        self.screen_w, self.screen_h = pyautogui.size()
+        self.left_counter = 0
+        self.right_counter = 0
+        self.stability_frames = stability_frames
+        self.left_down = False
+        self.right_down = False
+        self.alpha = smoothing_alpha
+        self.smooth_x = self.screen_w // 2
+        self.smooth_y = self.screen_h // 2
+        self.last_lm = None
 
-      angle = calculate_angle(tip_landmark, knuckle_landmark, base_landmark)
-      if angle > 150:
-        extended_fingers += 1
+    def _is_extended(self, lm, tip_id: int, pip_id: int) -> bool:
+        return lm[tip_id].y < lm[pip_id].y
 
-    thumb_tip = hand_landmarks.landmark[4]
-    thumb_base = hand_landmarks.landmark[2]
-    wrist = hand_landmarks.landmark[0]
-    angle = calculate_angle(thumb_tip, thumb_base, wrist)
+    def _move_cursor(self, lm) -> None:
+        x_cam = lm.x * self.cam_w
+        y_cam = lm.y * self.cam_h
+        dx = (x_cam - self.cam_w/2) * (self.screen_w/self.cam_w) * self.sensitivity
+        dy = (y_cam - self.cam_h/2) * (self.screen_h/self.cam_h) * self.sensitivity
+        target_x = int(self.screen_w/2 + dx)
+        target_y = int(self.screen_h/2 + dy)
+        self.smooth_x = int(self.alpha * target_x + (1 - self.alpha) * self.smooth_x)
+        self.smooth_y = int(self.alpha * target_y + (1 - self.alpha) * self.smooth_y)
+        try:
+            pyautogui.moveTo(self.smooth_x, self.smooth_y, duration=0)
+        except pyautogui.FailSafeException:
+            pass
 
-    if angle > 120:
-       extended_fingers += 1
+    def _handle_clicks(self, lm) -> None:
+        index_ext = self._is_extended(lm, self.TIP_IDS[1], self.PIP_IDS[1])
+        middle_ext = self._is_extended(lm, self.TIP_IDS[2], self.PIP_IDS[2])
+        if index_ext and not middle_ext:
+            self.left_counter += 1
+            if self.left_counter >= self.stability_frames and not self.left_down:
+                pyautogui.click()
+                self.left_down = True
+        else:
+            self.left_counter = 0
+            self.left_down = False
+        if middle_ext and not index_ext:
+            self.right_counter += 1
+            if self.right_counter >= self.stability_frames and not self.right_down:
+                pyautogui.rightClick()
+                self.right_down = True
+        else:
+            self.right_counter = 0
+            self.right_down = False
 
-    return extended_fingers
-
-def detect_hand_symbols(hand_landmarks):
-    """Detects 'Okay' and 'Thumbs Up' hand symbols."""
-    num_fingers = count_fingers_held_up(hand_landmarks)
-    thumb_tip = hand_landmarks.landmark[4]
-    index_tip = hand_landmarks.landmark[8]
-    wrist = hand_landmarks.landmark[0]
-    thumb_base = hand_landmarks.landmark[2]
-
-    # Check if the thumb is pointing upwards
-    # The angle between the wrist, thumb base, and thumb tip should be close to 180 degrees for a "Thumbs Up"
-    thumb_angle = calculate_angle(wrist, thumb_base, thumb_tip)
-    
-    if thumb_angle > 160:  # This range can be adjusted to detect upward-pointing thumbs
-        if num_fingers == 1:
-            return "Thumbs Up"
-
-
-    return None
-
-
-while cap.isOpened():
-    success, image = cap.read()
-    if not success:
-        print("Ignoring empty camera frame.")
-        continue
-    image = cv2.flip(image, 1)
-    image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    results = hands.process(image_rgb)
-
-    if results.multi_hand_landmarks:
-        for hand_landmarks in results.multi_hand_landmarks:
-            mp_drawing.draw_landmarks(image, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-            # Detect and display hand symbols
-            symbol = detect_hand_symbols(hand_landmarks)
-            if symbol:
-              cv2.putText(image, symbol, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-            else:
-              num_fingers = count_fingers_held_up(hand_landmarks)
-              if num_fingers > 0:
-                cv2.putText(image, f"Fingers: {num_fingers}", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    def run(self, camera_index: int = 0) -> None:
+        cap = cv2.VideoCapture(camera_index)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cam_w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cam_h)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if not cap.isOpened():
+            messagebox.showerror("Error", "Cannot open camera")
+            return
+        frame_dict = {'frame': None}
+        lock = threading.Lock()
+        threading.Thread(
+            target=start_capture_thread,
+            args=(cap, frame_dict, lock),
+            daemon=True
+        ).start()
+        try:
+            while True:
+                with lock:
+                    f = frame_dict['frame']
+                    frame = None if f is None else f.copy()
+                if frame is None:
+                    continue
+                frame = cv2.flip(frame, 1)
+                frame = cv2.resize(frame, (self.cam_w, self.cam_h))
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = self.hands.process(rgb)
+                if results.multi_hand_landmarks:
+                    self.last_lm = results.multi_hand_landmarks[0].landmark
+                    self._handle_clicks(self.last_lm)
+                if self.last_lm:
+                    self._move_cursor(self.last_lm[self.TIP_IDS[1]])
+                disp = cv2.resize(frame, (640, 480))
+                cv2.imshow("Hand-Mouse Control", disp)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
+        finally:
+            cv2.destroyAllWindows()
 
 
-    cv2.imshow('Hand Tracking', image)
+class HandDrawController(HandMouseController):
+    """Full-screen draw with continuous brush stroke."""
+    def run(self, camera_index: int = 0) -> None:
+        canvas = np.ones((self.screen_h, self.screen_w, 3), dtype=np.uint8) * 255
+        cv2.namedWindow("Draw Mode", cv2.WINDOW_NORMAL)
+        cv2.setWindowProperty(
+            "Draw Mode",
+            cv2.WND_PROP_FULLSCREEN,
+            cv2.WINDOW_FULLSCREEN
+        )
+        cap = cv2.VideoCapture(camera_index)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cam_w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cam_h)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if not cap.isOpened():
+            messagebox.showerror("Error", "Cannot open camera")
+            return
+        frame_dict = {'frame': None}
+        lock = threading.Lock()
+        threading.Thread(
+            target=start_capture_thread,
+            args=(cap, frame_dict, lock),
+            daemon=True
+        ).start()
+        prev_x, prev_y = None, None
+        try:
+            while True:
+                with lock:
+                    f = frame_dict['frame']
+                    frame = None if f is None else f.copy()
+                if frame is None:
+                    continue
+                frame = cv2.flip(frame, 1)
+                frame = cv2.resize(frame, (self.cam_w, self.cam_h))
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = self.hands.process(rgb)
+                if results.multi_hand_landmarks:
+                    lm = results.multi_hand_landmarks[0].landmark
+                    self.last_lm = lm
+                if self.last_lm and self._is_extended(
+                    self.last_lm, self.TIP_IDS[1], self.PIP_IDS[1]
+                ):
+                    # continuous stroke: draw line from prev to current
+                    curr_x, curr_y = self.smooth_x, self.smooth_y
+                    if prev_x is not None and prev_y is not None:
+                        cv2.line(canvas, (prev_x, prev_y), (curr_x, curr_y), (0,0,0), 5)
+                    prev_x, prev_y = curr_x, curr_y
+                else:
+                    prev_x, prev_y = None, None
+                if self.last_lm:
+                    self._move_cursor(self.last_lm[self.TIP_IDS[1]])
+                disp = canvas.copy()
+                cv2.circle(disp, (self.smooth_x, self.smooth_y), 10, (100,100,100), 2)
+                cv2.imshow("Draw Mode", disp)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('c'):
+                    canvas[:] = 255
+                if key == ord('q'):
+                    break
+        finally:
+            cv2.destroyAllWindows()
 
-    if cv2.waitKey(5) & 0xFF == ord('q'):
-        break
 
-cap.release()
-cv2.destroyAllWindows()
+# GUI menu using Tkinter
+
+def start_mouse_control() -> None:
+    root.destroy()
+    HandMouseController().run()
+
+def start_draw_mode() -> None:
+    root.destroy()
+    HandDrawController().run()
+
+def main() -> None:
+    global root
+    root = tk.Tk()
+    root.title("Hand Gesture App")
+    root.geometry("300x200")
+    tk.Label(root, text="Select Mode:", font=(None, 14)).pack(pady=10)
+    tk.Button(root, text="Mouse Control", width=20, command=start_mouse_control).pack(pady=5)
+    tk.Button(root, text="Draw Mode", width=20, command=start_draw_mode).pack(pady=5)
+    tk.Button(root, text="Exit", width=20, command=root.destroy).pack(pady=5)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
